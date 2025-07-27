@@ -1,8 +1,6 @@
 package http
 
 import (
-	"context"
-	"github.com/gin-gonic/gin"
 	"net/http"
 )
 
@@ -21,8 +19,3 @@ const (
 	StatusBadGateway          = http.StatusBadGateway
 	StatusServiceUnavailable  = http.StatusServiceUnavailable
 )
-
-func GinCtxFromContext(ctx context.Context) *gin.Context {
-	c := ctx.Value("gin-ctx")
-	return c.(*gin.Context)
-}

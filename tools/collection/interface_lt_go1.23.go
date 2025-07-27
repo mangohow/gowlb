@@ -1,10 +1,6 @@
-//go:build go1.23
+//go:build !go1.23
 
 package collection
-
-import (
-	"iter"
-)
 
 type Set[V comparable] interface {
 	Add(v V)
@@ -18,5 +14,4 @@ type Set[V comparable] interface {
 	ForEach(func(v V))
 	ForEachP(func(v *V))
 	Len() int
-	Iterator() iter.Seq[V]
 }

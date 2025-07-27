@@ -3,13 +3,14 @@ package projectcmd
 import (
 	"bytes"
 	"context"
-	"github.com/fatih/color"
-	"github.com/mangohow/gowlb/cmd/gowlb/parallel"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/fatih/color"
+	"github.com/mangohow/gowlb/cmd/gowlb/internal/parallel"
 )
 
 type ProjectGenerator struct {

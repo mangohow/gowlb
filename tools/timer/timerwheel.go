@@ -1,11 +1,12 @@
-package time
+package timer
 
 import (
 	"container/list"
-	"github.com/mangohow/gowlb/tools/math"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/mangohow/gowlb/tools/math"
 )
 
 type slot struct {
@@ -58,7 +59,7 @@ type TimerWheel struct {
 //	si: slot interval 每个槽的时间刻度
 //
 // 槽的数量越多，刻度越小，则越精确，但是消耗的资源越多
-func NewExecutePoolTimerWheel(sc int, si time.Duration, poolSize int) TimerContainer {
+func NewExecutePoolTimerWheel(sc int, si time.Duration, poolSize int) TimerScheduler {
 	if sc <= 0 || si <= 0 {
 		panic("sc and si must be positive")
 	}
@@ -74,17 +75,25 @@ func NewExecutePoolTimerWheel(sc int, si time.Duration, poolSize int) TimerConta
 	}
 	once := sync.Once{}
 	ch := make(chan func(), 1024)
+	var workerFunc func()
+	workerFunc = func() {
+		defer func() {
+			if r := recover(); r != nil {
+				go workerFunc()
+			}
+		}()
+
+		for {
+			fn := <-ch
+			if fn != nil {
+				fn()
+			}
+		}
+	}
 	w.triggerFn = func(fn func()) {
 		once.Do(func() {
 			for i := 0; i < poolSize; i++ {
-				go func() {
-					for {
-						fn := <-ch
-						if fn != nil {
-							fn()
-						}
-					}
-				}()
+				go workerFunc()
 			}
 		})
 
@@ -109,7 +118,7 @@ func NewExecutePoolTimerWheel(sc int, si time.Duration, poolSize int) TimerConta
 //	si: slot interval 每个槽的时间刻度
 //
 // 槽的数量越多，刻度越小，则越精确，但是消耗的资源越多
-func NewAsyncTimerWheel(sc int, si time.Duration) TimerContainer {
+func NewAsyncTimerWheel(sc int, si time.Duration) TimerScheduler {
 	if sc <= 0 || si <= 0 {
 		panic("sc and si must be positive")
 	}
@@ -126,7 +135,12 @@ func NewAsyncTimerWheel(sc int, si time.Duration) TimerContainer {
 
 	w.triggerFn = func(fn func()) {
 		if fn != nil {
-			go fn()
+			go func() {
+				defer func() {
+					recover()
+				}()
+				fn()
+			}()
 		}
 	}
 
@@ -142,7 +156,7 @@ func NewAsyncTimerWheel(sc int, si time.Duration) TimerContainer {
 //	si: slot interval 每个槽的时间刻度
 //
 // 槽的数量越多，刻度越小，则越精确，但是消耗的资源越多
-func NewSyncTimerWheel(sc int, si time.Duration) TimerContainer {
+func NewSyncTimerWheel(sc int, si time.Duration) TimerScheduler {
 	if sc <= 0 || si <= 0 {
 		panic("sc and si must be positive")
 	}
@@ -159,6 +173,9 @@ func NewSyncTimerWheel(sc int, si time.Duration) TimerContainer {
 
 	w.triggerFn = func(fn func()) {
 		if fn != nil {
+			defer func() {
+				recover()
+			}()
 			fn()
 		}
 	}

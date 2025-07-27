@@ -25,7 +25,7 @@ type EnumErrors struct {
 
 func (e EnumErrors) execute() string {
 	buf := new(bytes.Buffer)
-	tmpl, err := template.New("mangokit").Parse(ErrorTemplate)
+	tmpl, err := template.New("protoc-gen-error").Parse(ErrorTemplate)
 	if err != nil {
 		panic(err)
 	}

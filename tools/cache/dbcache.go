@@ -1,12 +1,13 @@
 package cache
 
 import (
+	"database/sql"
 	"fmt"
-	"github.com/jmoiron/sqlx"
-	"github.com/mangohow/gowlb/tools/collection"
-	"github.com/sirupsen/logrus"
 	"reflect"
 	"strings"
+
+	"github.com/mangohow/gowlb/llog"
+	"github.com/mangohow/gowlb/tools/collection"
 )
 
 type dbCache[K comparable, V any] struct {
@@ -19,8 +20,9 @@ type dbCacheConfig[K comparable, V any] struct {
 	insertFn    InsertFunc[V]
 	deleteFn    DeleteFunc[V]
 	updateFn    UpdateFunc[V]
+	rowScanner  RowScannerFunc[V]
 	keyFn       KeyFunc[K, V]
-	dbConn      *sqlx.DB
+	dbConn      *sql.DB
 	table       string
 	primaryKey  string
 	fields      []string
@@ -29,7 +31,7 @@ type dbCacheConfig[K comparable, V any] struct {
 	updateKeys  []string
 	updateNames map[string]struct{}
 	deleteKeys  []string
-	logger      *logrus.Logger
+	logger      llog.Logger
 }
 
 func NewDBCache[K comparable, V any](keyFn KeyFunc[K, V], opts ...DBCacheOption[K, V]) (DBCache[K, V], error) {
@@ -62,7 +64,7 @@ func NewDBCache[K comparable, V any](keyFn KeyFunc[K, V], opts ...DBCacheOption[
 		opt(&c.cfg)
 	}
 
-	if (c.cfg.selectFn == nil || c.cfg.insertFn == nil || c.cfg.updateFn == nil || c.cfg.deleteFn == nil) &&
+	if ((c.cfg.selectFn == nil && c.cfg.rowScanner == nil) || c.cfg.insertFn == nil || c.cfg.updateFn == nil || c.cfg.deleteFn == nil) &&
 		(c.cfg.table == "" || c.cfg.dbConn == nil) {
 		return nil, fmt.Errorf("table name and dbConn required")
 	}
@@ -98,19 +100,25 @@ func WithDeleteFunc[K comparable, V any](f DeleteFunc[V]) DBCacheOption[K, V] {
 	}
 }
 
+func WithRowMapper[K comparable, V any](f RowScannerFunc[V]) DBCacheOption[K, V] {
+	return func(c *dbCacheConfig[K, V]) {
+		c.rowScanner = f
+	}
+}
+
 func WithTableName[K comparable, V any](name string) DBCacheOption[K, V] {
 	return func(c *dbCacheConfig[K, V]) {
 		c.table = name
 	}
 }
 
-func WithDBConn[K comparable, V any](db *sqlx.DB) DBCacheOption[K, V] {
+func WithDBConn[K comparable, V any](db *sql.DB) DBCacheOption[K, V] {
 	return func(c *dbCacheConfig[K, V]) {
 		c.dbConn = db
 	}
 }
 
-func WithLogger[K comparable, V any](logger *logrus.Logger) DBCacheOption[K, V] {
+func WithLogger[K comparable, V any](logger llog.Logger) DBCacheOption[K, V] {
 	return func(c *dbCacheConfig[K, V]) {
 		c.logger = logger
 	}
@@ -223,8 +231,12 @@ func (d *dbCache[K, V]) genSelectFunc() {
 	d.cfg.selectFn = func() ([]V, error) {
 		res := make([]V, 0)
 
-		if err := d.cfg.dbConn.Select(&res, sq); err != nil {
+		rows, err := d.cfg.dbConn.Query(sq)
+		if err != nil {
 			return nil, err
+		}
+		for rows.Next() {
+			d.cfg.rowScanner(rows.Scan)
 		}
 
 		return res, nil

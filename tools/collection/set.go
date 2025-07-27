@@ -1,5 +1,7 @@
 package collection
 
+import "github.com/mangohow/gowlb/tools/collectionutils"
+
 type set[V comparable] struct {
 	set map[V]struct{}
 }
@@ -43,7 +45,7 @@ func (s *set[V]) Delete(v V) {
 }
 
 func (s *set[V]) Values() []V {
-	return Keys(s.set)
+	return collectionutils.Keys(s.set)
 }
 
 func (s *set[V]) Any(vs []V) bool {

@@ -1,8 +1,9 @@
-//go:build !go1.23
-
 package collection
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 type ConcurrentMap[K comparable, V any] interface {
 	Set(key K, v V)
@@ -29,16 +30,29 @@ type PLM[K comparable, V any] interface {
 	InnerMap() map[K]V
 }
 
-type Set[V comparable] interface {
-	Add(v V)
-	Adds(v ...V)
-	AddSet(s Set[V])
-	Has(v V) bool
-	Delete(v V)
-	Values() []V
-	Any([]V) bool
-	Every([]V) bool
-	ForEach(func(v V))
-	ForEachP(func(v *V))
-	Len() int
+type Queue[T any] interface {
+	Push(T)
+	Pop() T
+	Peek() T
+	Size() int
+	Empty() bool
+	Clear()
+}
+
+type Stack[T any] interface {
+	Queue[T]
+}
+
+type BlockingQueue[T any] interface {
+	Push(T)
+	Pop() (item T, shutdown bool)
+	Size() int
+	Empty() bool
+	Shutdown()
+	ShutdownWithDrained()
+}
+
+type DelayingQueue[T any] interface {
+	BlockingQueue[T]
+	PushAfter(T, time.Duration)
 }

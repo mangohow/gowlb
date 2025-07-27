@@ -1,12 +1,12 @@
-package time
+package timer
 
 import "time"
 
-type TimerContainer interface {
+type TimerScheduler interface {
 	// SetTimer 设置一次性执行的定时器
-	SetTimer(duration time.Duration, fn func()) Timer
+	SetTimer(duration time.Duration, task func()) Timer
 	// SetTicker 设置定期执行的定时器
-	SetTicker(duration time.Duration, fn func()) Ticker
+	SetTicker(duration time.Duration, task func()) Ticker
 }
 
 // Timer 对Timer来说, Stop不是必要的, 因为当定时器到期会自动解除引用, 以进行垃圾回收

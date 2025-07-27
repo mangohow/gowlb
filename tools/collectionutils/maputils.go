@@ -1,4 +1,4 @@
-package collection
+package collectionutils
 
 func ToMap[K comparable, S, V any](s []S, conv func(S) (K, V)) map[K]V {
 	m := make(map[K]V, len(s))

@@ -3,6 +3,8 @@ package collection
 import (
 	"sync"
 	"unsafe"
+
+	"github.com/mangohow/gowlb/tools/collectionutils"
 )
 
 type concurrentMap[K comparable, V any] struct {
@@ -62,7 +64,7 @@ func (c *concurrentMap[K, V]) Keys() []K {
 	c.RLock()
 	defer c.RUnlock()
 
-	return Keys(c.m)
+	return collectionutils.Keys(c.m)
 }
 
 func (c *concurrentMap[K, V]) KeysSet() Set[K] {
@@ -82,7 +84,7 @@ func (c *concurrentMap[K, V]) KeysSet() Set[K] {
 func (c *concurrentMap[K, V]) Values() []V {
 	c.RLock()
 	defer c.RUnlock()
-	return Values(c.m)
+	return collectionutils.Values(c.m)
 }
 
 func (c *concurrentMap[K, V]) Merge(other ConcurrentMap[K, V]) {

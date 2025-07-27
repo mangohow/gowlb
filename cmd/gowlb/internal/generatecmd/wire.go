@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/fatih/color"
-	"github.com/mangohow/gowlb/cmd/gowlb/parallel"
+	"github.com/mangohow/gowlb/cmd/gowlb/internal/parallel"
 	"github.com/spf13/cobra"
 )
 

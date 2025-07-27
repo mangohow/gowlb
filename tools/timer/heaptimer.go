@@ -1,16 +1,17 @@
-package time
+package timer
 
 import (
-	"container/heap"
 	"fmt"
 	"os"
 	"runtime/debug"
 	"sync"
 	"time"
+
+	"github.com/mangohow/gowlb/tools/collection"
 )
 
 type HeapTimer struct {
-	timers    []*timer
+	timers    collection.Queue[*timer]
 	addCh     chan *timer
 	modCh     chan modTimer
 	removeCh  chan *timer
@@ -22,27 +23,39 @@ type modTimer struct {
 	d time.Duration
 }
 
-func NewExecutePoolHeapTimer(poolSize int) TimerContainer {
+// 执行任务时使用协程池
+func NewExecutePoolHeapTimer(poolSize int) TimerScheduler {
 	t := &HeapTimer{
 		addCh:    make(chan *timer, 1024),
 		modCh:    make(chan modTimer, 1024),
 		removeCh: make(chan *timer, 1024),
+		timers: collection.NewPriorityQueue[*timer](func(a, b *timer) bool {
+			return a.trigger.Before(b.trigger)
+		}),
 	}
 
 	once := sync.Once{}
 	ch := make(chan *timer, 1024)
 	// 触发回调函数时，通过协程池去处理
+	var workerFunc func()
+	workerFunc = func() {
+		defer func() {
+			if r := recover(); r != nil {
+				go workerFunc()
+			}
+		}()
+
+		for {
+			t := <-ch
+			if t.fn != nil {
+				t.fn()
+			}
+		}
+	}
 	t.triggerFn = func(t *timer) {
 		once.Do(func() {
 			for i := 0; i < poolSize; i++ {
-				go func() {
-					for {
-						t := <-ch
-						if t.fn != nil {
-							t.fn()
-						}
-					}
-				}()
+				go workerFunc()
 			}
 		})
 
@@ -60,17 +73,26 @@ func NewExecutePoolHeapTimer(poolSize int) TimerContainer {
 	return t
 }
 
-func NewAsyncHeapTimer() TimerContainer {
+// 执行任务时启动一个goroutine
+func NewAsyncHeapTimer() TimerScheduler {
 	t := &HeapTimer{
 		addCh:    make(chan *timer, 1024),
 		modCh:    make(chan modTimer, 1024),
 		removeCh: make(chan *timer, 1024),
+		timers: collection.NewPriorityQueue[*timer](func(a, b *timer) bool {
+			return a.trigger.Before(b.trigger)
+		}),
 	}
 
 	// 触发回调函数时，直接启动一个Goroutine去处理
 	t.triggerFn = func(t *timer) {
 		if t.fn != nil {
-			go t.fn()
+			go func() {
+				defer func() {
+					recover()
+				}()
+				t.fn()
+			}()
 		}
 	}
 
@@ -79,15 +101,23 @@ func NewAsyncHeapTimer() TimerContainer {
 	return t
 }
 
-func NewSyncHeapTimer() TimerContainer {
+// 执行任务时同步调用, 适用于立刻就能执行完成的任务, 不适合耗时任务, 会阻塞其他任务
+func NewSyncHeapTimer() TimerScheduler {
 	t := &HeapTimer{
 		addCh:    make(chan *timer, 1024),
 		modCh:    make(chan modTimer, 1024),
 		removeCh: make(chan *timer, 1024),
+		timers: collection.NewPriorityQueue[*timer](func(a, b *timer) bool {
+			return a.trigger.Before(b.trigger)
+		}),
 	}
 
 	// 触发回调函数时，直接同步处理
 	t.triggerFn = func(t *timer) {
+		defer func() {
+			recover()
+		}()
+
 		if t.fn != nil {
 			t.fn()
 		}
@@ -96,35 +126,6 @@ func NewSyncHeapTimer() TimerContainer {
 	go t.tick()
 
 	return t
-}
-
-func (h *HeapTimer) Len() int {
-	return len(h.timers)
-}
-
-func (h *HeapTimer) Less(i, j int) bool {
-	return h.timers[i].trigger.Before(h.timers[j].trigger)
-}
-
-func (h *HeapTimer) Swap(i, j int) {
-	h.timers[i], h.timers[j] = h.timers[j], h.timers[i]
-}
-
-func (h *HeapTimer) Push(x any) {
-	h.timers = append(h.timers, x.(*timer))
-}
-
-func (h *HeapTimer) Pop() any {
-	n := len(h.timers) - 1
-	t := h.timers[n]
-	// 置为nil让垃圾回收器可以回收
-	h.timers[n] = nil
-	h.timers = h.timers[:n]
-	return t
-}
-
-func (h *HeapTimer) top() *timer {
-	return h.timers[0]
 }
 
 // 通过一个goroutine来处理所有定时器的添加、重置、删除以及定时器的触发
@@ -137,40 +138,81 @@ func (h *HeapTimer) tick() {
 		}
 	}()
 
-	minTrigger := time.Hour
-	if len(h.timers) > 0 {
-		minTrigger = h.top().trigger.Sub(time.Now())
-		if minTrigger < 0 {
-			minTrigger = 0
+	var (
+		never            = make(<-chan time.Time)
+		nextTriggerTimer *time.Timer
+
+		// 使用非阻塞的方式添加，防止阻塞该goroutine
+		addFn = func(t *timer) {
+			select {
+			case h.addCh <- t:
+			default:
+				go func() {
+					h.addCh <- t
+				}()
+			}
 		}
-	}
-	sysTm := time.NewTimer(minTrigger)
-	defer sysTm.Stop()
-	// 使用非阻塞的方式添加，防止阻塞该goroutine
-	addFn := func(t *timer) {
-		select {
-		case h.addCh <- t:
-		default:
-			go func() {
-				h.addCh <- t
-			}()
-		}
-	}
+	)
 
 	for {
+		now := time.Now()
+		for h.timers.Size() > 0 {
+			m := h.timers.Peek()
+			// 如果堆顶的定时器没有触发, 设置最小触发时间，等下次触发
+			if m.trigger.After(now) {
+				break
+			}
+
+			// 定时器触发了，从堆中删除
+			h.timers.Pop()
+			// 定时器触发，检查是否被删除了
+			// 如果被删除了，从堆中移除，并且再次检查堆顶
+			if m.removed {
+				continue
+			}
+
+			// 执行回调函数
+			h.triggerFn(m)
+
+			// 如果是ticker，则重新添加到定时器集合中
+			if m.ticker {
+				m.trigger = now.Add(m.duration)
+				addFn(m)
+			}
+		}
+		nextTrigger := never
+		if h.timers.Size() > 0 {
+			if nextTriggerTimer != nil {
+				nextTriggerTimer.Stop()
+			}
+			top := h.timers.Peek()
+			nextTriggerTimer = time.NewTimer(top.duration)
+			nextTrigger = nextTriggerTimer.C
+		}
+
 		select {
 		// 向堆中添加一个定时器
 		case t := <-h.addCh:
 			// 1. 如果添加的是第一个定时器，那么它肯定是最早触发的，需要重置定时器
 			// 2. 和堆顶的最小触发定时器进行比较，如果刚添加的更早触发，则需要重置系统定时器
-			minTrigger = time.Duration(-1)
-			if h.Len() == 0 || (h.Len() > 0 && h.top().trigger.After(t.trigger)) {
-				minTrigger = t.trigger.Sub(time.Now())
+			if t.trigger.Before(now) {
+				h.triggerFn(t)
+				break
 			}
-			if minTrigger != -1 {
-				sysTm.Reset(minTrigger)
+			h.timers.Push(t)
+			drained := false
+			for !drained {
+				select {
+				case t := <-h.addCh:
+					if t.trigger.Before(time.Now()) {
+						h.triggerFn(t)
+					} else {
+						h.timers.Push(t)
+					}
+				default:
+					drained = true
+				}
 			}
-			heap.Push(h, t)
 		// 删除原来的定时器，重新添加一个
 		case t := <-h.modCh:
 			tt := *t.t
@@ -181,39 +223,7 @@ func (h *HeapTimer) tick() {
 		// 删除时，只设置删除标志
 		case t := <-h.removeCh:
 			t.removed = true
-		case <-sysTm.C:
-		}
-		now := time.Now()
-		for h.Len() > 0 {
-			m := h.top()
-			// 如果堆顶的定时器没有触发, 设置最小触发时间，等下次触发
-			if m.trigger.After(now) {
-				sysTm.Reset(m.trigger.Sub(now))
-				break
-			}
-
-			// 定时器触发，检查是否被删除了
-			// 如果被删除了，从堆中移除，并且再次检查堆顶
-			if m.removed {
-				heap.Pop(h)
-				continue
-			}
-
-			// 定时器触发了，从堆中删除，并执行回调函数
-			heap.Pop(h)
-			h.triggerFn(m)
-
-			// 如果是trigger，则重新添加到定时器集合中
-			if m.ticker {
-				m.trigger = now.Add(m.duration)
-				addFn(m)
-			}
-		}
-
-		// 如果堆中没有元素，则休眠一小时
-		if h.Len() == 0 {
-			sysTm.Reset(time.Hour)
-			continue
+		case <-nextTrigger:
 		}
 	}
 

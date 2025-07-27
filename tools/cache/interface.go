@@ -16,3 +16,4 @@ type InsertFunc[V any] func(V) error
 type UpdateFunc[V any] func(V) error
 type DeleteFunc[V any] func(V) error
 type KeyFunc[K comparable, V any] func(V) K
+type RowScannerFunc[V any] func(scan func(...any) error) V
