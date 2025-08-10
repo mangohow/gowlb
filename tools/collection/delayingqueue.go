@@ -7,6 +7,8 @@ import (
 type TimerScheduler interface {
 	// SetTimer 设置一次性执行的定时器
 	SetTimer(duration time.Duration, fn func()) Timer
+	Shutdown()
+	IsShutdown() bool
 }
 
 type Timer interface {
@@ -35,7 +37,16 @@ func (d *delayingQueue[T]) PushAfter(e T, duration time.Duration) {
 		return
 	}
 
+	if d.scheduler.IsShutdown() {
+		return
+	}
+
 	d.scheduler.SetTimer(duration, func() {
 		d.Push(e)
 	})
+}
+
+func (d *delayingQueue[T]) Shutdown() {
+	d.BlockingQueue.Shutdown()
+	d.scheduler.Shutdown()
 }

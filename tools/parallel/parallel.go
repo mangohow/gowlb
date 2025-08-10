@@ -8,7 +8,7 @@ import (
 
 type DoWorkPieceFunc[T any] func(piece int, val T) error
 
-type DoWorkPieceResultFucnc[T, R any] func(piece int, val T) (R, error)
+type DoWorkPieceResultFunc[T, R any] func(piece int, val T) (R, error)
 
 type options struct {
 	chunkSize int
@@ -112,7 +112,7 @@ func Parallelize[T any](ctx context.Context, workers int, tasks []T, doWorkPiece
 	return nil
 }
 
-func ParallelizeResult[T, R any](ctx context.Context, workers int, tasks []T, doWorkPiece DoWorkPieceResultFucnc[T, R], opts ...Options) ([]R, error) {
+func ParallelizeResult[T, R any](ctx context.Context, workers int, tasks []T, doWorkPiece DoWorkPieceResultFunc[T, R], opts ...Options) ([]R, error) {
 	pieces := len(tasks)
 	if pieces == 0 {
 		return nil, nil

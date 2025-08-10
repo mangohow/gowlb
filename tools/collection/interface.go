@@ -55,4 +55,11 @@ type BlockingQueue[T any] interface {
 type DelayingQueue[T any] interface {
 	BlockingQueue[T]
 	PushAfter(T, time.Duration)
+	Shutdown()
+}
+
+type ExpirationMap[K comparable, V any] interface {
+	ConcurrentMap[K, V]
+	SetExpired(key K, val V, duration time.Duration)
+	Destroy()
 }

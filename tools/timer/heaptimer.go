@@ -16,6 +16,7 @@ type HeapTimer struct {
 	modCh     chan modTimer
 	removeCh  chan *timer
 	triggerFn func(t *timer)
+	stop      chan struct{}
 }
 
 type modTimer struct {
@@ -32,6 +33,7 @@ func NewExecutePoolHeapTimer(poolSize int) TimerScheduler {
 		timers: collection.NewPriorityQueue[*timer](func(a, b *timer) bool {
 			return a.trigger.Before(b.trigger)
 		}),
+		stop: make(chan struct{}),
 	}
 
 	once := sync.Once{}
@@ -82,6 +84,7 @@ func NewAsyncHeapTimer() TimerScheduler {
 		timers: collection.NewPriorityQueue[*timer](func(a, b *timer) bool {
 			return a.trigger.Before(b.trigger)
 		}),
+		stop: make(chan struct{}),
 	}
 
 	// 触发回调函数时，直接启动一个Goroutine去处理
@@ -110,6 +113,7 @@ func NewSyncHeapTimer() TimerScheduler {
 		timers: collection.NewPriorityQueue[*timer](func(a, b *timer) bool {
 			return a.trigger.Before(b.trigger)
 		}),
+		stop: make(chan struct{}),
 	}
 
 	// 触发回调函数时，直接同步处理
@@ -191,6 +195,8 @@ func (h *HeapTimer) tick() {
 		}
 
 		select {
+		case <-h.stop:
+			return
 		// 向堆中添加一个定时器
 		case t := <-h.addCh:
 			// 1. 如果添加的是第一个定时器，那么它肯定是最早触发的，需要重置定时器
@@ -229,12 +235,31 @@ func (h *HeapTimer) tick() {
 
 }
 
+func (h *HeapTimer) Shutdown() {
+	close(h.stop)
+}
+
+func (h *HeapTimer) IsShutdown() bool {
+	select {
+	case <-h.stop:
+		return true
+	default:
+		return false
+	}
+}
+
 func (h *HeapTimer) add(d time.Duration, fn func(), ticker bool) *timer {
 	if fn == nil {
 		panic("nil function")
 	}
 	if d < 0 {
 		panic("negative duration")
+	}
+
+	select {
+	case <-h.stop:
+		panic("timer scheduler is shutdown")
+	default:
 	}
 
 	tm := &timer{

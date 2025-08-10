@@ -44,6 +44,7 @@ type TimerWheel struct {
 	slots  []*slot       // 所有的槽
 
 	triggerFn func(fn func())
+	stop      chan struct{}
 
 	// debug信息, 记录最长用时和最长队列长度
 	longestUseTime atomic.Int64
@@ -68,6 +69,7 @@ func NewExecutePoolTimerWheel(sc int, si time.Duration, poolSize int) TimerSched
 		si:     si,
 		circle: time.Duration(sc) * si,
 		slots:  make([]*slot, sc),
+		stop:   make(chan struct{}),
 	}
 	for i := range w.slots {
 		w.slots[i] = &slot{}
@@ -127,6 +129,7 @@ func NewAsyncTimerWheel(sc int, si time.Duration) TimerScheduler {
 		si:     si,
 		circle: time.Duration(sc) * si,
 		slots:  make([]*slot, sc),
+		stop:   make(chan struct{}),
 	}
 	for i := range w.slots {
 		w.slots[i] = &slot{}
@@ -165,6 +168,7 @@ func NewSyncTimerWheel(sc int, si time.Duration) TimerScheduler {
 		si:     si,
 		circle: time.Duration(sc) * si,
 		slots:  make([]*slot, sc),
+		stop:   make(chan struct{}),
 	}
 	for i := range w.slots {
 		w.slots[i] = &slot{}
@@ -194,6 +198,16 @@ func (t *TimerWheel) SetTicker(d time.Duration, fn func()) Ticker {
 }
 
 func (t *TimerWheel) add(tm *tw, d time.Duration, fn func(), ticker, locked bool) *tw {
+	if d < 0 {
+		panic("negative duration")
+	}
+
+	select {
+	case <-t.stop:
+		panic("timer scheduler is shutdown")
+	default:
+	}
+
 	if tm == nil {
 		tm = &tw{
 			w:        t,
@@ -225,11 +239,14 @@ func (t *TimerWheel) add(tm *tw, d time.Duration, fn func(), ticker, locked bool
 }
 
 func (t *TimerWheel) start() {
-	i := 0
 	for {
-		time.Sleep(t.si)
-		i++
-		t.tick()
+		select {
+		case <-t.stop:
+			return
+		default:
+			time.Sleep(t.si)
+			t.tick()
+		}
 	}
 }
 
@@ -267,6 +284,19 @@ func (t *TimerWheel) tick() {
 		}
 	}
 
+}
+
+func (t *TimerWheel) Shutdown() {
+	close(t.stop)
+}
+
+func (h *TimerWheel) IsShutdown() bool {
+	select {
+	case <-h.stop:
+		return true
+	default:
+		return false
+	}
 }
 
 func (t *TimerWheel) remove(tm *tw) {
