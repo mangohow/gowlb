@@ -1,22 +1,24 @@
 package timer
 
 import (
+	"errors"
 	"fmt"
+	"github.com/mangohow/gowlb/tools/workerpool"
 	"os"
 	"runtime/debug"
-	"sync"
 	"time"
 
 	"github.com/mangohow/gowlb/tools/collection"
 )
 
 type HeapTimer struct {
-	timers    collection.Queue[*timer]
-	addCh     chan *timer
-	modCh     chan modTimer
-	removeCh  chan *timer
-	triggerFn func(t *timer)
-	stop      chan struct{}
+	timers          collection.Queue[*timer]
+	addCh           chan *timer
+	modCh           chan modTimer
+	removeCh        chan *timer
+	triggerFn       func(t *timer)
+	stop            chan struct{}
+	shutdownHandler func()
 }
 
 type modTimer struct {
@@ -24,8 +26,46 @@ type modTimer struct {
 	d time.Duration
 }
 
-// 执行任务时使用协程池
-func NewExecutePoolHeapTimer(poolSize int) TimerScheduler {
+type config struct {
+	pool  workerpool.WorkerPool
+	sync  bool
+	async bool
+}
+
+type Option func(*config)
+
+func WithWorkerPool(pool workerpool.WorkerPool) Option {
+	return func(c *config) {
+		c.pool = pool
+	}
+}
+
+func WithSync() Option {
+	return func(c *config) {
+		c.sync = true
+	}
+}
+
+func WithAsync() Option {
+	return func(c *config) {
+		c.async = true
+	}
+}
+
+var (
+	noOptsProvidedErr = errors.New("no option provided")
+)
+
+func NewHeapTaskScheduler(opts ...Option) (TaskScheduler, error) {
+	if len(opts) == 0 {
+		return nil, noOptsProvidedErr
+	}
+
+	cfg := config{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	t := &HeapTimer{
 		addCh:    make(chan *timer, 1024),
 		modCh:    make(chan modTimer, 1024),
@@ -36,100 +76,46 @@ func NewExecutePoolHeapTimer(poolSize int) TimerScheduler {
 		stop: make(chan struct{}),
 	}
 
-	once := sync.Once{}
-	ch := make(chan *timer, 1024)
-	// 触发回调函数时，通过协程池去处理
-	var workerFunc func()
-	workerFunc = func() {
-		defer func() {
-			if r := recover(); r != nil {
-				go workerFunc()
-			}
-		}()
+	if cfg.pool != nil {
+		if err := cfg.pool.Start(); err != nil {
+			return nil, err
+		}
 
-		for {
-			t := <-ch
+		t.triggerFn = func(t *timer) {
+			_ = cfg.pool.Submit(t.fn)
+		}
+
+		t.shutdownHandler = func() {
+			cfg.pool.Shutdown(false)
+		}
+	} else if cfg.async {
+		// 触发回调函数时，直接启动一个Goroutine去处理
+		t.triggerFn = func(t *timer) {
+			if t.fn != nil {
+				go func() {
+					defer func() {
+						recover()
+					}()
+					t.fn()
+				}()
+			}
+		}
+	} else if cfg.sync {
+		// 触发回调函数时，直接同步处理
+		t.triggerFn = func(t *timer) {
+			defer func() {
+				recover()
+			}()
+
 			if t.fn != nil {
 				t.fn()
 			}
 		}
 	}
-	t.triggerFn = func(t *timer) {
-		once.Do(func() {
-			for i := 0; i < poolSize; i++ {
-				go workerFunc()
-			}
-		})
-
-		select {
-		case ch <- t:
-		default:
-			go func() {
-				ch <- t
-			}()
-		}
-	}
 
 	go t.tick()
 
-	return t
-}
-
-// 执行任务时启动一个goroutine
-func NewAsyncHeapTimer() TimerScheduler {
-	t := &HeapTimer{
-		addCh:    make(chan *timer, 1024),
-		modCh:    make(chan modTimer, 1024),
-		removeCh: make(chan *timer, 1024),
-		timers: collection.NewPriorityQueue[*timer](func(a, b *timer) bool {
-			return a.trigger.Before(b.trigger)
-		}),
-		stop: make(chan struct{}),
-	}
-
-	// 触发回调函数时，直接启动一个Goroutine去处理
-	t.triggerFn = func(t *timer) {
-		if t.fn != nil {
-			go func() {
-				defer func() {
-					recover()
-				}()
-				t.fn()
-			}()
-		}
-	}
-
-	go t.tick()
-
-	return t
-}
-
-// 执行任务时同步调用, 适用于立刻就能执行完成的任务, 不适合耗时任务, 会阻塞其他任务
-func NewSyncHeapTimer() TimerScheduler {
-	t := &HeapTimer{
-		addCh:    make(chan *timer, 1024),
-		modCh:    make(chan modTimer, 1024),
-		removeCh: make(chan *timer, 1024),
-		timers: collection.NewPriorityQueue[*timer](func(a, b *timer) bool {
-			return a.trigger.Before(b.trigger)
-		}),
-		stop: make(chan struct{}),
-	}
-
-	// 触发回调函数时，直接同步处理
-	t.triggerFn = func(t *timer) {
-		defer func() {
-			recover()
-		}()
-
-		if t.fn != nil {
-			t.fn()
-		}
-	}
-
-	go t.tick()
-
-	return t
+	return t, nil
 }
 
 // 通过一个goroutine来处理所有定时器的添加、重置、删除以及定时器的触发
@@ -237,6 +223,9 @@ func (h *HeapTimer) tick() {
 
 func (h *HeapTimer) Shutdown() {
 	close(h.stop)
+	if h.shutdownHandler != nil {
+		h.shutdownHandler()
+	}
 }
 
 func (h *HeapTimer) IsShutdown() bool {
@@ -289,11 +278,11 @@ func (h *HeapTimer) reset(tm *timer, duration time.Duration) {
 	}
 }
 
-func (h *HeapTimer) SetTimer(duration time.Duration, fn func()) Timer {
+func (h *HeapTimer) SetTimer(duration time.Duration, fn func()) TaskTimer {
 	return h.add(duration, fn, false)
 }
 
-func (h *HeapTimer) SetTicker(duration time.Duration, fn func()) Ticker {
+func (h *HeapTimer) SetTicker(duration time.Duration, fn func()) TaskTicker {
 	return h.add(duration, fn, true)
 }
 

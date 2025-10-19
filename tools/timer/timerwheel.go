@@ -51,19 +51,29 @@ type TimerWheel struct {
 	totalUseTime   atomic.Int64
 	tickTimes      atomic.Int64
 	longestListLen atomic.Int64
+
+	shutdownHandler func()
 }
 
-// NewExecutePoolTimerWheel 创建一个时间轮定时容器
+// NewWheeledTaskScheduler 创建一个时间轮定时容器
 // inputs:
 //
 //	sc: slot count 槽数量
 //	si: slot interval 每个槽的时间刻度
 //
 // 槽的数量越多，刻度越小，则越精确，但是消耗的资源越多
-func NewExecutePoolTimerWheel(sc int, si time.Duration, poolSize int) TimerScheduler {
+func NewWheeledTaskScheduler(sc int, si time.Duration, opts ...Option) (TaskScheduler, error) {
 	if sc <= 0 || si <= 0 {
 		panic("sc and si must be positive")
 	}
+	if len(opts) == 0 {
+		return nil, noOptsProvidedErr
+	}
+	cfg := config{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	w := &TimerWheel{
 		sc:     sc,
 		si:     si,
@@ -75,125 +85,53 @@ func NewExecutePoolTimerWheel(sc int, si time.Duration, poolSize int) TimerSched
 		w.slots[i] = &slot{}
 		w.slots[i].timers.Init()
 	}
-	once := sync.Once{}
-	ch := make(chan func(), 1024)
-	var workerFunc func()
-	workerFunc = func() {
-		defer func() {
-			if r := recover(); r != nil {
-				go workerFunc()
-			}
-		}()
 
-		for {
-			fn := <-ch
+	if cfg.pool != nil {
+		if err := cfg.pool.Start(); err != nil {
+			return nil, err
+		}
+
+		w.triggerFn = func(fn func()) {
+			_ = cfg.pool.Submit(fn)
+		}
+		w.shutdownHandler = func() {
+			cfg.pool.Shutdown(false)
+		}
+	} else if cfg.async {
+		// 触发回调函数时，直接启动一个Goroutine去处理
+		w.triggerFn = func(fn func()) {
+			if fn != nil {
+				go func() {
+					defer func() {
+						recover()
+					}()
+					fn()
+				}()
+			}
+		}
+	} else if cfg.sync {
+		// 触发回调函数时，直接同步处理
+		w.triggerFn = func(fn func()) {
+			defer func() {
+				recover()
+			}()
+
 			if fn != nil {
 				fn()
 			}
 		}
 	}
-	w.triggerFn = func(fn func()) {
-		once.Do(func() {
-			for i := 0; i < poolSize; i++ {
-				go workerFunc()
-			}
-		})
-
-		select {
-		case ch <- fn:
-		default:
-			go func() {
-				ch <- fn
-			}()
-		}
-	}
 
 	go w.start()
 
-	return w
+	return w, nil
 }
 
-// NewAsyncTimerWheel 创建一个时间轮定时容器
-// inputs:
-//
-//	sc: slot count 槽数量
-//	si: slot interval 每个槽的时间刻度
-//
-// 槽的数量越多，刻度越小，则越精确，但是消耗的资源越多
-func NewAsyncTimerWheel(sc int, si time.Duration) TimerScheduler {
-	if sc <= 0 || si <= 0 {
-		panic("sc and si must be positive")
-	}
-	w := &TimerWheel{
-		sc:     sc,
-		si:     si,
-		circle: time.Duration(sc) * si,
-		slots:  make([]*slot, sc),
-		stop:   make(chan struct{}),
-	}
-	for i := range w.slots {
-		w.slots[i] = &slot{}
-		w.slots[i].timers.Init()
-	}
-
-	w.triggerFn = func(fn func()) {
-		if fn != nil {
-			go func() {
-				defer func() {
-					recover()
-				}()
-				fn()
-			}()
-		}
-	}
-
-	go w.start()
-
-	return w
-}
-
-// NewSyncTimerWheel 创建一个时间轮定时容器
-// inputs:
-//
-//	sc: slot count 槽数量
-//	si: slot interval 每个槽的时间刻度
-//
-// 槽的数量越多，刻度越小，则越精确，但是消耗的资源越多
-func NewSyncTimerWheel(sc int, si time.Duration) TimerScheduler {
-	if sc <= 0 || si <= 0 {
-		panic("sc and si must be positive")
-	}
-	w := &TimerWheel{
-		sc:     sc,
-		si:     si,
-		circle: time.Duration(sc) * si,
-		slots:  make([]*slot, sc),
-		stop:   make(chan struct{}),
-	}
-	for i := range w.slots {
-		w.slots[i] = &slot{}
-		w.slots[i].timers.Init()
-	}
-
-	w.triggerFn = func(fn func()) {
-		if fn != nil {
-			defer func() {
-				recover()
-			}()
-			fn()
-		}
-	}
-
-	go w.start()
-
-	return w
-}
-
-func (t *TimerWheel) SetTimer(d time.Duration, fn func()) Timer {
+func (t *TimerWheel) SetTimer(d time.Duration, fn func()) TaskTimer {
 	return t.add(nil, d, fn, false, false)
 }
 
-func (t *TimerWheel) SetTicker(d time.Duration, fn func()) Ticker {
+func (t *TimerWheel) SetTicker(d time.Duration, fn func()) TaskTicker {
 	return t.add(nil, d, fn, true, false)
 }
 
@@ -288,6 +226,9 @@ func (t *TimerWheel) tick() {
 
 func (t *TimerWheel) Shutdown() {
 	close(t.stop)
+	if t.shutdownHandler != nil {
+		t.shutdownHandler()
+	}
 }
 
 func (h *TimerWheel) IsShutdown() bool {
